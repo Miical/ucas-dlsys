@@ -4,21 +4,25 @@ import torch
 import torch.nn as nn
 import torchvision
 import torchvision.transforms as transforms
+from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
+# 训练集增强
 trans_train = transforms.Compose([
-    transforms.RandomResizedCrop(224),
-    transforms.RandomHorizontalFlip(),
+    transforms.RandomCrop(32, padding=4),        # 随机裁剪+padding
+    transforms.RandomHorizontalFlip(),           # 随机水平翻转
+    transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),   # 颜色抖动（增强）
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225])
 ])
 
+# 验证集增强
 trans_valid = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225])
 ])
 
 trainset = torchvision.datasets.CIFAR10(
@@ -173,10 +177,10 @@ class ViT(nn.Module):
         return self.mlp_head(x)
 
 net = ViT(
-    image_size = 224,
-    patch_size = 16,
+    image_size = 32,
+    patch_size = 4,
     num_classes = 10,
-    dim = 512,
+    dim = 256,
     depth = 6,
     heads = 8,
     mlp_dim = 512,
@@ -189,8 +193,11 @@ net = ViT(
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 net.to(device)
 optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
+# scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.4, patience=2)
+scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.4, patience=2, verbose=True)
+# scheduler = StepLR(optimizer, step_size=1, gamma=0.5)
 criterion = nn.CrossEntropyLoss()
-net.load_state_dict(torch.load('checkpoint/ckpt_best.pth')['net'])
+# net.load_state_dict(torch.load('checkpoint/ckpt_best.pth')['net'])
 
 def progress_bar(current, total, msg=None):
     bar_len = 65
@@ -223,8 +230,8 @@ def train(epoch):
         total += targets.size(0)
         correct += predicted.eq(targets).sum().item()
 
-        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                        % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
+        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d) | LR: %.5f'
+                        % (train_loss/(batch_idx+1), 100.*correct/total, correct, total, optimizer.param_groups[0]['lr']))
     return train_loss / (batch_idx + 1)
 
 best_acc = 0.
@@ -249,6 +256,8 @@ def test(epoch):
             progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
                             % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
 
+    scheduler.step(test_loss / (batch_idx + 1))
+    # scheduler.step()
     acc = 100. * correct / total
     if acc > best_acc:
         best_acc = acc
@@ -264,7 +273,7 @@ def test(epoch):
         best_acc = acc
 
     os.makedirs('log', exist_ok=True)
-    content = time.ctime() + ' ' + f'Epoch: {epoch} | Loss: {test_loss/(batch_idx+1)} | Acc: {acc}%\n'
+    content = time.ctime() + ' ' + f'Epoch: {epoch} | Loss: {test_loss/(batch_idx+1)} | Acc: {acc}% | LR: {optimizer.param_groups[0]["lr"]}\n'
     print(content)
     with open('log/log.txt', 'a') as f:
         f.write(content)
@@ -275,5 +284,5 @@ if __name__ == '__main__':
     for epoch in range(1, 1001):
         train_loss = train(epoch)
         test_loss = test(epoch)
-        if epoch % 10 == 0:
+        if epoch % 5 == 0:
             torch.save(net.state_dict(), f'checkpoint/ckpt_{epoch}.pth')
